@@ -6,8 +6,8 @@ from skimage.io import imsave
 from numpy import fromfile, transpose, round_, sort, argwhere, array
 from numpy.random import seed
 from torch import (
-    Tensor, abs as tabs, cat, randn, min, from_numpy, manual_seed, zeros, norm,
-    matmul,
+    Tensor, abs as tabs, cat, randn, min as tmin, from_numpy, manual_seed,
+    zeros, norm, matmul,
 )
 from torch.nn.functional import interpolate, grid_sample, mse_loss
 from torch.utils.data import DataLoader, ConcatDataset
@@ -52,6 +52,7 @@ class EffDepthTraining(LightningModule):
         self.batch_sources_id = [
             argwhere(ids == sid)[0, 0] for sid in self.hparams.sources_ids
         ]
+        print(self.batch_target_id, self.batch_sources_id)
 
         self.intrinsics, self.inv_intrinsics = compute_intrinsics(
             hparams.height, hparams.width,
@@ -68,7 +69,7 @@ class EffDepthTraining(LightningModule):
         )
 
     def forward(
-        self, inputs: Tensor, target_id: int, sources_ids: List[int],
+        self, inputs: Tensor
     ) -> Tuple[Dict[int, Tensor], Dict[int, Tuple[Tensor, Tensor, Tensor]]]:
         """
         inputs: [b, l, c, w, h]:
@@ -98,15 +99,15 @@ class EffDepthTraining(LightningModule):
             features.append(feature.view(b, l, ce, he, we))
 
         disparities: Dict[int, Tensor] = self.depth_decoder([
-            feature[:, target_id] for feature in features
+            feature[:, self.batch_target_id] for feature in features
         ])
         poses: Dict[int, Tuple[Tensor, Tensor, Tensor]] = self._estimate_poses(
-            features, target_id, sources_ids,
+            features,
         )
         return disparities, poses
 
     def _estimate_poses(
-        self, features: List[Tensor], target_id: int, sources_ids: List[int],
+        self, features: List[Tensor],
     ) -> Dict[int, Tuple[Tensor, Tensor]]:
         """
         Estimate poses between each (prev -> target) & (target -> next) frames
@@ -128,17 +129,15 @@ class EffDepthTraining(LightningModule):
                 euler angles and translation vector.
         """
         poses: Dict[int, Tuple[Tensor, Tensor, Tensor]] = {}
-        for sid in sources_ids:
+        for bsid in self.batch_sources_id:
             pose_inputs = (
-                [features[-1][:, sid], features[-1][:, target_id]]
-                if sid < target_id else
-                [features[-1][:, target_id], features[-1][:, sid]]
+                [features[-1][:, bsid], features[-1][:, self.batch_target_id]]
+                if bsid < self.batch_target_id else
+                [features[-1][:, self.batch_target_id], features[-1][:, bsid]]
             )
-            axisangle, translation, velocity = self.pose_decoder(pose_inputs)
-            poses[sid] = (
+            axisangle, translation = self.pose_decoder(pose_inputs)
+            poses[bsid] = (
                 axisangle.squeeze_(1), translation.squeeze_(1),
-                velocity,
-                # velocity.squeeze_(1),
             )
         return poses
 
@@ -151,20 +150,49 @@ class EffDepthTraining(LightningModule):
         ssim_loss = self.ssim(predicted, target).mean(dim=1, keepdim=True)
         return 0.85 * ssim_loss + 0.15 * l1_loss
 
-    # def _velocity_loss(
-    #     self, poses: Dict[int, Tuple[Tensor, Tensor, Tensor]],
-    #     velocities: Tensor,
-    # ) -> Tensor:
-    #     velocity_loss = 0
-    #     for bsid in self.batch_sources_id:
-    #         _, _, velocity = poses[bsid]
-    #         target_velocity = (
-    #             velocities[:, self.batch_target_id]
-    #             if bsid < self.batch_target_id else
-    #             velocities[:, bsid]
-    #         )
-    #         velocity_loss += mse_loss(velocity, target_velocity)
-    #     return velocity_loss / len(self.batch_sources_id)
+    def _compute_identity_reprojection_loss(self, inputs: Tensor) -> Tensor:
+        """
+        Compute identity reprojection losses between source & target images.
+        """
+        identity_reprojection_loss: Tensor = None
+        for bsid in self.batch_sources_id:
+            il = self._reprojection_loss(
+                inputs[:, self.batch_target_id], inputs[:, bsid],
+            )
+            il += randn(il.shape, device=il.device) * 1e-5
+            if identity_reprojection_loss is None:
+                identity_reprojection_loss = il
+                continue
+            identity_reprojection_loss = tmin(
+                cat((il, identity_reprojection_loss), dim=1),
+                dim=1, keepdim=True,
+            )[0]
+        return identity_reprojection_loss
+
+    def _compute_smooth_loss(
+        self, inputs: Tensor, scale_disparity: Tensor, scale: int,
+    ) -> Tensor:
+        """
+        Compute smooth loss between scale disparity
+        and normalized scaled target input image.
+        """
+        scale_factor = 2 ** scale
+        if scale > 0:
+            scaled_target = interpolate(inputs[:, self.batch_target_id], (
+                self.hparams.height // scale_factor,
+                self.hparams.width // scale_factor,
+            ), mode="bilinear", align_corners=False)
+        else:
+            scaled_target = inputs[:, self.batch_target_id]
+
+        normalized_disparity = scale_disparity / (
+            scale_disparity.mean(2, True).mean(3, True) + 1e-7
+        )
+        return (
+            get_smooth_loss(normalized_disparity, scaled_target)
+            * self.hparams.disparity_smoothness
+            / scale_factor
+        )
 
     def _warp_image(
         self, image: Tensor, disparity: Tensor, transformation: Tensor,
@@ -173,13 +201,13 @@ class EffDepthTraining(LightningModule):
         Given transformation between `disparity` and `image`,
         project disparity onto `image` and sample new image from there.
         """
-        disparity = interpolate(
+        scaled_disparity = interpolate(
             disparity, (self.hparams.height, self.hparams.width),
             mode="bilinear", align_corners=False,
         )
-        _, depth = disp_to_depth(
-            disparity, self.hparams.min_depth, self.hparams.max_depth,
-        )
+        depth = disp_to_depth(
+            scaled_disparity, self.hparams.min_depth, self.hparams.max_depth,
+        )[1]
 
         point_cloud = self.backprojections(depth, self.inv_intrinsics)
         pixel_coordinates: Tensor = self.projections(
@@ -190,50 +218,9 @@ class EffDepthTraining(LightningModule):
             padding_mode="border", align_corners=False,
         )
 
-    def _compute_identity_reprojection_loss(self, inputs: Tensor) -> Tensor:
-        """
-        Compute identity reprojection losses between source & target images.
-        """
-        identity_reprojection_loss = None
-        for sid in self.batch_sources_id:
-            il = self._reprojection_loss(
-                inputs[:, self.batch_target_id], inputs[:, sid],
-            )
-            if identity_reprojection_loss is None:
-                identity_reprojection_loss = il
-                continue
-            identity_reprojection_loss = min(
-                cat((il, identity_reprojection_loss), dim=1), dim=1,
-            )[0].unsqueeze_(1)
-        identity_reprojection_loss += randn(
-            identity_reprojection_loss.shape, device=inputs.device,
-        ) * 1e-5
-        return identity_reprojection_loss
-
-    def _compute_smooth_loss(
-        self, inputs: Tensor, scaled_disparity: Tensor, scale: int,
-    ):
-        """
-        Compute smooth loss between scale disparity
-        and normalized scaled target input image.
-        """
-        scale_factor = 2 ** scale
-        scaled_target = interpolate(inputs[:, self.batch_target_id], (
-            self.hparams.height // scale_factor,
-            self.hparams.width // scale_factor,
-        ), mode="bilinear", align_corners=False)
-        scaled_disparity = scaled_disparity / (
-            scaled_disparity.mean(2, True).mean(3, True) + 1e-7
-        )
-        return (
-            get_smooth_loss(scaled_disparity, scaled_target)
-            * self.hparams.disparity_smoothness
-            / scale_factor
-        )
-
     def _compute_scale_reprojection_loss(
         self, inputs: Tensor, poses: Dict[int, Tuple[Tensor, Tensor]],
-        scaled_disparity: Tensor, scale: int,
+        scale_disparity: Tensor,
     ) -> Tensor:
         """
         Compute reprojection loss between
@@ -241,29 +228,28 @@ class EffDepthTraining(LightningModule):
         and target image.
         """
         scale_reprojection_loss: Tensor = None
-        for sid in self.batch_sources_id:
-            axisangle, translation, _ = poses[sid]
+        for bsid in self.batch_sources_id:
+            axisangle, translation = poses[bsid]
             transformation = transformation_from_parameters(
-                axisangle, translation, invert=sid < self.batch_target_id,
+                axisangle, translation, invert=bsid < self.batch_target_id,
             )
             warped = self._warp_image(
-                inputs[:, sid], scaled_disparity, transformation,
+                inputs[:, bsid], scale_disparity, transformation,
             )
             reprojection_loss = self._reprojection_loss(
                 inputs[:, self.batch_target_id], warped,
             )
             if scale_reprojection_loss is None:
                 scale_reprojection_loss = reprojection_loss
-            else:
-                scale_reprojection_loss = min(cat(
-                    (scale_reprojection_loss, reprojection_loss), dim=1),
-                    dim=1,
-                )[0].unsqueeze_(1)
+                continue
+            scale_reprojection_loss = tmin(cat(
+                (scale_reprojection_loss, reprojection_loss), dim=1),
+                dim=1, keepdim=True,
+            )[0]
         return scale_reprojection_loss
 
     def _compute_losses(
-        self, inputs: Tensor,
-        disparities: Dict[int, Tensor],
+        self, inputs: Tensor, disparities: Dict[int, Tensor],
         poses: Dict[int, Tuple[Tensor, Tensor]],
     ) -> Tensor:
         identity_reprojection_loss = (
@@ -271,15 +257,15 @@ class EffDepthTraining(LightningModule):
         )
         total_loss: Tensor = 0
         for scale in self.hparams.scales:
-            scaled_disparity = disparities[scale]
+            scale_disparity = disparities[scale]
             scale_reprojection_loss = self._compute_scale_reprojection_loss(
-                inputs, poses, scaled_disparity, scale,
+                inputs, poses, scale_disparity,
             )
-            total_loss += min(cat(
+            total_loss += tmin(cat(
                 (identity_reprojection_loss, scale_reprojection_loss), dim=1,
             ), dim=1)[0].mean()
             total_loss += self._compute_smooth_loss(
-                inputs, scaled_disparity, scale,
+                inputs, scale_disparity, scale,
             )
         total_loss /= len(self.hparams.scales)
         return total_loss
@@ -307,7 +293,8 @@ class EffDepthTraining(LightningModule):
                 datasets.append(SequenceData.no_target_dataset(
                     config["frame_template"], config["length"], self.hparams,
                 ))
-        self.train_dataset = ConcatDataset(datasets)
+        # self.train_dataset = ConcatDataset(datasets)
+        self.train_dataset = datasets[0]
 
     def train_dataloader(self):
         return DataLoader(
@@ -316,53 +303,19 @@ class EffDepthTraining(LightningModule):
 
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx: int):
         inputs, velocity = batch
-        disparities, poses = self.forward(
-            inputs=inputs,
-            target_id=self.batch_target_id, sources_ids=self.batch_sources_id,
-        )
-        loss = self._compute_losses(
-            inputs=inputs, disparities=disparities, poses=poses,
-        )
-        log = {"loss": loss}
-        # if (velocity != -1).all():  # TODO fix, for batch size > 1 create mask
-        #     velocity_loss = self._velocity_loss(poses, velocity)
-        #     loss += velocity_loss
-        #     log["vel_loss"] = velocity_loss
+        disparities, poses = self.forward(inputs)
+        loss = self._compute_losses(inputs, disparities, poses)
+
         if batch_idx % 100 == 0:
             base = r"C:\Users\tonys\projects\python\comma\effdepth-models\disp"
             disp_path = join(base, f"disp-{self.global_step}.jpg")
-            warp_path = join(base, f"warp-{self.global_step}-2.jpg")
 
             disp_image = disparities[0].detach()
-            axisangle, translation, estimated_velocity = poses[2]
-            axisangle = axisangle.detach()
-            translation = translation.detach()
-            transformation = transformation_from_parameters(
-                axisangle, translation, invert=False,
-            )
-            warped = self._warp_image(
-                inputs[:, self.batch_target_id], disp_image, transformation,
-            )
-
-            axisangle = axisangle.detach().cpu().numpy()
-            translation = translation.detach().cpu().numpy()
-            # estimated_velocity = estimated_velocity.detach().cpu().numpy()
-            # velocity = velocity.detach().cpu().numpy()
-            disp_image = disp_image.detach().cpu().numpy()
-            warped = warped.detach().cpu().numpy()
-            print("======================")
-            print("Transformation", axisangle, translation)
-            print("Disparity", disp_image.min(), disp_image.max())
-            # print("Velocity", velocity, estimated_velocity)
+            disp_image = disp_image.cpu().numpy()
             disp_image = round_(disp_image[0, 0] * 255).astype("uint8")
-            warped = round_(
-                transpose(warped[0], (1, 2, 0)) * 255,
-            ).astype("uint8")
+            imsave(disp_path, disp_image)
 
-            imsave(disp_path, disp_image, check_contrast=False)
-            imsave(warp_path, warped, check_contrast=False)
-
-        return {"loss": loss, "log": log}
+        return {"loss": loss, "log": {"loss": loss}}
 
 
 def main():
@@ -376,7 +329,7 @@ def main():
         lr=3e-4, step_size=10, batch_size=1,
         height=192, width=640,
         min_depth=0.1, max_depth=100,
-        target_id=3, sources_ids=[0, 6], sequence_length=7,
+        target_id=2, sources_ids=[0, 4], sequence_length=5,
         device="cuda",
     )
     loggin_dir = r"C:\Users\tonys\projects\python\comma\effdepth-models"
@@ -386,7 +339,7 @@ def main():
     trainer = Trainer(
         logger=TensorBoardLogger(loggin_dir),
         checkpoint_callback=checkpoint_callback, early_stop_callback=False,
-        benchmark=True, max_epochs=20, accumulate_grad_batches=12,
+        max_epochs=20, accumulate_grad_batches=12,
         gpus=1 if hparams.device == "cuda" else 0,
     )
     trainer.fit(model)
@@ -397,7 +350,7 @@ def main():
     # )
     # output_template = (
     #     r"C:\Users\tonys\projects\python\comma\speedchallenge"
-    #     r"\test\frames-192x640\frame-{:05}.jpg"
+    #     r"\train\frames-192x640\frame-{:05}.jpg"
     # )
     # preprocess(input_template, output_template, 10798, None)
 

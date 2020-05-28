@@ -3,7 +3,7 @@ from typing import Tuple, List, Union
 from tqdm import tqdm
 from os.path import join
 
-from numpy import ndarray, array
+from numpy import ndarray, array, tan, pi
 from skimage.io import imread, imsave
 from skimage.transform import resize
 from torch import Tensor, tensor, cat, float32, pinverse, full
@@ -33,6 +33,15 @@ def compute_intrinsics(height: int, width: int) -> Tuple[Tensor, Tensor]:
     )
     intrinsics[0, :] *= width
     intrinsics[1, :] *= height
+    # scaling = width / 1164
+    # original_focal = 910
+    # focal = original_focal * scaling
+    # intrinsics: Tensor = tensor(
+    #     [[focal, 0, 0.5 * width, 0],
+    #      [0, focal, 0.5 * height, 0],
+    #      [0, 0, 1, 0],
+    #      [0, 0, 0, 1]], dtype=float32,
+    # )
     inv_intrinsics: Tensor = pinverse(intrinsics).unsqueeze_(0)
     intrinsics.unsqueeze_(0)
     return intrinsics, inv_intrinsics
@@ -59,7 +68,7 @@ class SequenceData(Dataset):
         frame_template: str, length: int, hparams: Namespace,
     ) -> "SequenceData":
         targets = full((length,), -1, dtype=float32)
-        length = targets.shape[0] // hparams.sequence_length - 1
+        length = length // hparams.sequence_length - 1
         return SequenceData(
             frame_template, targets, length,
             hparams.sequence_length, hparams.target_id, hparams.sources_ids,
@@ -78,7 +87,7 @@ class SequenceData(Dataset):
     def __len__(self):
         return self.length
 
-    def __getitem__(self, index: int) -> Tuple[Tensor, Union[None, Tensor]]:
+    def __getitem__(self, index: int) -> Tuple[Tensor, Tensor]:
         start = index * self.sequence_length
         ids = self.ids + start
         return self.load_images(ids), self.targets[ids]

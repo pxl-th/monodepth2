@@ -19,21 +19,16 @@ class PoseDecoder(Module):
         self.squeezer = Sequential(
             Conv2d(self.encoder_channels[-1], 256, 1), ReLU(True),
         )
-        self.decoder = Sequential(
+        self.pose = Sequential(
             Conv2d(input_features * 256, 256, 3, stride, 1), ReLU(True),
             Conv2d(256, 256, 3, stride, 1), ReLU(True),
+            Conv2d(256, 6 * prediction_frames, 1),
         )
-        self.pose = Conv2d(256, 6 * prediction_frames, 1)
-        # self.velocity = Conv2d(256, prediction_frames, 1)
 
-    def forward(self, features: List[Tensor]) -> Tuple[Tensor, Tensor, Tensor]:
+    def forward(self, features: List[Tensor]) -> Tuple[Tensor, Tensor]:
         squeezed = cat([self.squeezer(feature) for feature in features], 1)
-        features = self.decoder(squeezed)
-        out = self.pose(features).mean(3).mean(2)
-        # velocity = self.velocity(features).mean(3).mean(2)
-
+        out = self.pose(squeezed).mean(3).mean(2)
         out = 0.01 * out.view(-1, self.prediction_frames, 1, 6)
         axisangle = out[..., :3]
         translation = out[..., 3:]
-        # return axisangle, translation, velocity
-        return axisangle, translation, None
+        return axisangle, translation
