@@ -1,47 +1,34 @@
 from argparse import Namespace
-from typing import Tuple, List, Union
-from tqdm import tqdm
+from typing import Tuple, List
 from os.path import join
 
-from numpy import ndarray, array, tan, pi
-from skimage.io import imread, imsave
-from skimage.transform import resize
+from numpy import ndarray, array
+from skimage.io import imread
 from torch import Tensor, tensor, cat, float32, pinverse, full
 from torch.utils.data import Dataset
 
-
-def preprocess(
-    input_template: str, output_template: str, length: int,
-    size: Tuple[int, int],
-) -> None:
-    for i in tqdm(range(length)):
-        image: ndarray = imread(input_template.format(i))
-        image = image[158:350]
-        if size is not None:
-            image = resize(image, size)
-            image *= 255
-            image = image.round().astype("uint8")
-        imsave(output_template.format(i), image, check_contrast=False)
+from preprocess import get_paths
 
 
 def compute_intrinsics(height: int, width: int) -> Tuple[Tensor, Tensor]:
-    intrinsics: Tensor = tensor(
-        [[0.58, 0, 0.5, 0],
-         [0, 1.92, 0.5, 0],
-         [0, 0, 1, 0],
-         [0, 0, 0, 1]], dtype=float32,
-    )
-    intrinsics[0, :] *= width
-    intrinsics[1, :] *= height
-    # scaling = width / 1164
-    # original_focal = 910
-    # focal = original_focal * scaling
     # intrinsics: Tensor = tensor(
-    #     [[focal, 0, 0.5 * width, 0],
-    #      [0, focal, 0.5 * height, 0],
+    #     [[0.58, 0, 0.5, 0],
+    #      [0, 1.92, 0.5, 0],
     #      [0, 0, 1, 0],
     #      [0, 0, 0, 1]], dtype=float32,
     # )
+    # intrinsics[0, :] *= width
+    # intrinsics[1, :] *= height
+    original_width = 1164
+    original_focal = 910
+    scaling = width / original_width
+    focal = original_focal * scaling
+    intrinsics: Tensor = tensor(
+        [[focal, 0, 0.5 * width, 0],
+         [0, focal, 0.5 * height, 0],
+         [0, 0, 1, 0],
+         [0, 0, 0, 1]], dtype=float32,
+    )
     inv_intrinsics: Tensor = pinverse(intrinsics).unsqueeze_(0)
     intrinsics.unsqueeze_(0)
     return intrinsics, inv_intrinsics
@@ -108,32 +95,22 @@ class SequenceData(Dataset):
 
 def datasets_config(hparams: Namespace):
     datasets = [
-        {  # speedchallenge train data
-            "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\frames-192x640\frame-{:05}.jpg",
-            "targets": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\train.txt",
-        },
+        # {  # speedchallenge train data
+        #     "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\frames-192x640\frame-{:05}.jpg",
+        #     "targets": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\train.txt",
+        # },
         # {  # speedchallenge test data
         #     "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\test\frames-192x640\frame-{:05}.jpg",
         #     "length": 10798,
         # },
     ]
-    # comma_2k19_base = r"C:\Users\tonys\projects\python\comma\2k19"
-    # comma_2k19_subs = (
-    #     (r"2018-07-29--11-17-20", range(3, 8)),
-    #     (r"2018-07-29--12-02-42", range(27, 32)),
-    #     (r"2018-07-29--16-37-17", range(4, 6)),
-    #     (r"2018-07-30--13-03-07", range(14, 22)),
-    # )
-    # frames_sub = "frames"
-    # frame_name = "frame-{}.jpg"
-    # target_name = "speed.txt"
-    # for sub, ranges in comma_2k19_subs:
-    #     for i in ranges:
-    #         sub_base = join(comma_2k19_base, sub, str(i))
-    #         frame_template = join(sub_base, frames_sub, frame_name)
-    #         target_path = join(sub_base, target_name)
-    #         datasets.append({
-    #             "frame_template": frame_template,
-    #             "targets": target_path,
-    #         })
+    comma_2k19_base = r"C:\Users\tonys\projects\python\comma\2k19"
+    frames_sub = "frames-160x320"
+    frame_name = "frame-{}.jpg"
+    target_name = "speed.txt"
+    for sub in get_paths(comma_2k19_base):
+        datasets.append({
+            "frame_template": join(sub, frames_sub, frame_name),
+            "targets": join(sub, target_name),
+        })
     return datasets

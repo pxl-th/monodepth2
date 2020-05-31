@@ -7,7 +7,7 @@ from numpy import fromfile, transpose, round_, sort, argwhere, array
 from numpy.random import seed
 from torch import (
     Tensor, abs as tabs, cat, randn, min as tmin, from_numpy, manual_seed,
-    zeros, norm, matmul,
+    zeros, norm, matmul, float32, tensor,
 )
 from torch.nn.functional import interpolate, grid_sample, mse_loss
 from torch.utils.data import DataLoader, ConcatDataset
@@ -23,9 +23,7 @@ from models.layers import (
     SSIM, BackprojectDepth, Project3D, disp_to_depth,
     transformation_from_parameters, get_smooth_loss,
 )
-from dataset import (
-    SequenceData, preprocess, compute_intrinsics, datasets_config,
-)
+from dataset import SequenceData, compute_intrinsics, datasets_config
 
 
 seed(0)
@@ -52,7 +50,10 @@ class EffDepthTraining(LightningModule):
         self.batch_sources_id = [
             argwhere(ids == sid)[0, 0] for sid in self.hparams.sources_ids
         ]
-        print(self.batch_target_id, self.batch_sources_id)
+        self.time_delta = tensor([[
+            abs(sid - self.hparams.target_id)
+            for sid in self.hparams.sources_ids
+        ]], dtype=float32, device=hparams.device)
 
         self.intrinsics, self.inv_intrinsics = compute_intrinsics(
             hparams.height, hparams.width,
@@ -67,6 +68,12 @@ class EffDepthTraining(LightningModule):
         self.backprojections: BackprojectDepth = BackprojectDepth(
             hparams.batch_size, hparams.height, hparams.width,
         )
+        print(
+            f"Target id: {self.batch_target_id}, "
+            f"Sources ids: {self.batch_sources_id}"
+        )
+        print(f"Intrinsics: {self.intrinsics}")
+
 
     def forward(
         self, inputs: Tensor
@@ -136,8 +143,10 @@ class EffDepthTraining(LightningModule):
                 [features[-1][:, self.batch_target_id], features[-1][:, bsid]]
             )
             axisangle, translation = self.pose_decoder(pose_inputs)
+            # axisangle, translation, velocity = self.pose_decoder(pose_inputs)
             poses[bsid] = (
                 axisangle.squeeze_(1), translation.squeeze_(1),
+                # velocity.squeeze_(1),
             )
         return poses
 
@@ -248,7 +257,7 @@ class EffDepthTraining(LightningModule):
             )[0]
         return scale_reprojection_loss
 
-    def _compute_losses(
+    def _compute_photometric_losses(
         self, inputs: Tensor, disparities: Dict[int, Tensor],
         poses: Dict[int, Tuple[Tensor, Tensor]],
     ) -> Tensor:
@@ -270,6 +279,66 @@ class EffDepthTraining(LightningModule):
         total_loss /= len(self.hparams.scales)
         return total_loss
 
+    def _velocity_loss(
+        self,
+        poses: Dict[int, Tuple[Tensor, Tensor, Tensor]], velocities: Tensor,
+    ) -> Tensor:
+        target_velocities = velocities[:, [
+            self.batch_target_id, self.batch_sources_id[1]
+        ]]
+        estimated_velocities = cat([
+            poses[bsid][2] for bsid in self.batch_sources_id
+        ]).unsqueeze_(0)
+        return mse_loss(estimated_velocities, target_velocities)
+
+    def _pose_constraint(
+        self,
+        poses: Dict[int, Tuple[Tensor, Tensor]], velocities: Tensor,
+    ) -> Tensor:
+        constraint: Tensor = 0
+        starting_point = zeros(1, 4, 1, dtype=float32).to(velocities.device)
+        starting_point[:, 3] = 1.0
+
+        for bsid, sid in zip(self.batch_sources_id, self.hparams.sources_ids):
+            invert = bsid < self.batch_target_id
+
+            target_velocity = velocities[
+                :, [self.batch_target_id if invert else bsid]
+            ]
+            time_delta = abs(self.hparams.target_id - sid)
+            distance = target_velocity * self.hparams.dt * time_delta * 0.01
+
+            axisangle, translation = poses[bsid]
+            transformation = transformation_from_parameters(
+                axisangle, translation, invert=invert,
+            )
+            transformed_point = matmul(transformation, starting_point)
+
+            constraint += mse_loss(
+                norm(transformed_point[:, :3], dim=1), distance,
+            )
+        constraint /= len(self.batch_sources_id)
+        return constraint
+
+    def _pose_constraint_z(
+        self,
+        poses: Dict[int, Tuple[Tensor, Tensor]], velocities: Tensor,
+    ) -> Tensor:
+        tvid = [
+            self.batch_target_id if bsid < self.batch_target_id else bsid
+            for bsid in self.batch_sources_id
+        ]
+        distances = (
+            velocities[:, tvid] * self.hparams.dt * self.time_delta * 0.01
+        )
+        translations = cat(
+            [poses[bsid][1] for bsid in self.batch_sources_id], dim=1,
+        )
+        return (
+            mse_loss(tabs(translations[..., 2]), distances)
+            + mse_loss(norm(translations, dim=2), distances ** 2)
+        )
+
     def configure_optimizers(self):
         train_parameters = (
             list(self.encoder.parameters())
@@ -284,27 +353,38 @@ class EffDepthTraining(LightningModule):
         datasets = []
         for config in datasets_config(self.hparams):
             if "targets" in config:
+                targets = from_numpy(fromfile(
+                    config["targets"], dtype="float32", sep="\n",
+                ))
                 datasets.append(SequenceData.target_dataset(
-                    config["frame_template"],
-                    from_numpy(fromfile(config["targets"], dtype="float32", sep="\n")),
-                    self.hparams,
+                    config["frame_template"], targets, self.hparams,
                 ))
             else:
                 datasets.append(SequenceData.no_target_dataset(
                     config["frame_template"], config["length"], self.hparams,
                 ))
-        # self.train_dataset = ConcatDataset(datasets)
-        self.train_dataset = datasets[0]
+        self.train_dataset = ConcatDataset(datasets)
 
     def train_dataloader(self):
         return DataLoader(
-            self.train_dataset, self.hparams.batch_size, shuffle=True,
+            self.train_dataset, self.hparams.batch_size,
+            shuffle=True, drop_last=True,
         )
 
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx: int):
-        inputs, velocity = batch
+        inputs, velocities = batch
         disparities, poses = self.forward(inputs)
-        loss = self._compute_losses(inputs, disparities, poses)
+        loss = self._compute_photometric_losses(inputs, disparities, poses)
+
+        log = {"loss": loss}
+        # if (velocities != -1).all():
+        #     velocity_loss = self._velocity_loss(poses, velocities)
+        #     log["velocity_loss"] = velocity_loss
+        #     loss += velocity_loss * 0.0001
+        # if (velocities != -1).all():
+        #     pose_constraint = self._pose_constraint_z(poses, velocities)
+        #     log["pose_constraint"] = pose_constraint
+        #     loss += pose_constraint
 
         if batch_idx % 100 == 0:
             base = r"C:\Users\tonys\projects\python\comma\effdepth-models\disp"
@@ -313,9 +393,30 @@ class EffDepthTraining(LightningModule):
             disp_image = disparities[0].detach()
             disp_image = disp_image.cpu().numpy()
             disp_image = round_(disp_image[0, 0] * 255).astype("uint8")
-            imsave(disp_path, disp_image)
+            imsave(disp_path, disp_image, check_contrast=False)
 
-        return {"loss": loss, "log": {"loss": loss}}
+            for bsid in self.batch_sources_id:
+                rotation, translation = poses[bsid]
+                transformation = transformation_from_parameters(
+                    rotation, translation, invert=bsid < self.batch_target_id,
+                )
+                warped_image = self._warp_image(
+                    inputs[:, bsid], disparities[0], transformation,
+                )
+                warped_image = warped_image.detach().cpu().numpy()[0]
+                warped_image = transpose(warped_image, (1, 2, 0))
+                warped_image = round_(warped_image * 255).astype("uint8")
+
+                warp_path = join(base, f"warp-{self.global_step}-{bsid}.jpg")
+                imsave(warp_path, warped_image, check_contrast=False)
+
+            print(
+                "R", rotation.detach().cpu().numpy()[0, 0],
+                " | t", translation.detach().cpu().numpy()[0, 0],
+            )
+            print("Target velocity", velocities[0, 0].detach().cpu().numpy())
+
+        return {"loss": loss, "log": log}
 
 
 def main():
@@ -325,34 +426,31 @@ def main():
         scales=[0, 1, 2, 3],
         input_images=1,  # how many images in channel dim to feed to encoder
         pose_sequence_length=2,  # how many frames to feed to pose NN at once
-        disparity_smoothness=1e-3,
-        lr=3e-4, step_size=10, batch_size=1,
-        height=192, width=640,
-        min_depth=0.1, max_depth=100,
-        target_id=2, sources_ids=[0, 4], sequence_length=5,
-        device="cuda",
+        disparity_smoothness=1e-3,  # control sharpness of disparity
+        lr=1e-4, step_size=10, batch_size=4,
+        height=160, width=320,  # have to be divisible by 2**5
+        min_depth=0.1, max_depth=100.0,
+        target_id=4, sources_ids=[0, 8], sequence_length=9,
+        # kitti at 10 hz, maybe increase length
+        device="cuda", dt=1 / 20,
     )
     loggin_dir = r"C:\Users\tonys\projects\python\comma\effdepth-models"
     checkpoint_path = join(loggin_dir, r"manual-velocity\depth-{epoch:02d}")
     model = EffDepthTraining(hparams)
+    # load_checkpoint_path = join(
+    #     loggin_dir, r"manual-velocity-better\depth-epoch=01.ckpt",
+    # )
+    # model = EffDepthTraining.load_from_checkpoint(load_checkpoint_path)
     checkpoint_callback = ModelCheckpoint(checkpoint_path, save_top_k=-1)
     trainer = Trainer(
         logger=TensorBoardLogger(loggin_dir),
         checkpoint_callback=checkpoint_callback, early_stop_callback=False,
-        max_epochs=20, accumulate_grad_batches=12,
+        max_epochs=20,
+        accumulate_grad_batches=3,
         gpus=1 if hparams.device == "cuda" else 0,
+        benchmark=True,
     )
     trainer.fit(model)
-
-    # input_template = (
-    #     r"C:\Users\tonys\projects\python\comma\speedchallenge"
-    #     r"\test\frames\frame-{:05}.jpg"
-    # )
-    # output_template = (
-    #     r"C:\Users\tonys\projects\python\comma\speedchallenge"
-    #     r"\train\frames-192x640\frame-{:05}.jpg"
-    # )
-    # preprocess(input_template, output_template, 10798, None)
 
 
 if __name__ == "__main__":

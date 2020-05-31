@@ -27,7 +27,8 @@ def disp_to_depth(disp: Tensor, min_depth: float, max_depth: float) -> Tensor:
 def transformation_from_parameters(
     axisangle: Tensor, translation: Tensor, invert: bool = False,
 ) -> Tensor:
-    """Convert the network's (axisangle, translation) output into a 4x4 matrix
+    """
+    Convert the network's (axisangle, translation) output into a 4x4 matrix
     """
     R = rot_from_axisangle(axisangle)
     t = translation.clone()
@@ -44,7 +45,7 @@ def transformation_from_parameters(
     return M
 
 
-def get_translation_matrix(translation_vector):
+def get_translation_matrix(translation_vector: Tensor) -> Tensor:
     """Convert a translation vector into a 4x4 transformation matrix"""
     T = torch.zeros(translation_vector.shape[0], 4, 4).to(
         device=translation_vector.device,
@@ -59,7 +60,7 @@ def get_translation_matrix(translation_vector):
     return T
 
 
-def rot_from_axisangle(vec):
+def rot_from_axisangle(vec: Tensor) -> Tensor:
     """
     Convert an axisangle rotation into a 4x4 transformation matrix
     (adapted from https://github.com/Wallacoloo/printipi)
@@ -102,7 +103,7 @@ def rot_from_axisangle(vec):
 
 class ConvBlock(Module):
     """Layer to perform a convolution followed by ELU"""
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.conv = Conv3x3(in_channels, out_channels)
         self.nonlin = nn.ELU(inplace=True)
@@ -129,8 +130,8 @@ class Conv3x3(Module):
 
 class BackprojectDepth(nn.Module):
     """Layer to transform a depth image into a point cloud"""
-    def __init__(self, batch_size, height, width):
-        super(BackprojectDepth, self).__init__()
+    def __init__(self, batch_size: int, height: int, width: int):
+        super().__init__()
 
         self.batch_size = batch_size
         self.height = height
@@ -154,7 +155,7 @@ class BackprojectDepth(nn.Module):
             torch.cat([self.pix_coords, self.ones], 1), requires_grad=False,
         )
 
-    def forward(self, depth, inv_K):
+    def forward(self, depth: Tensor, inv_K: Tensor) -> Tensor:
         cam_points = torch.matmul(inv_K[:, :3, :3], self.pix_coords)
         cam_points = depth.view(self.batch_size, 1, -1) * cam_points
         cam_points = torch.cat([cam_points, self.ones], 1)
@@ -175,7 +176,7 @@ class Project3D(nn.Module):
         self.width = width
         self.eps = eps
 
-    def forward(self, points, K, T):
+    def forward(self, points: Tensor, K: Tensor, T: Tensor) -> Tensor:
         P = torch.matmul(K, T)[:, :3, :]
         cam_points = torch.matmul(P, points)
 
@@ -192,8 +193,9 @@ class Project3D(nn.Module):
         return (pix_coords - 0.5) * 2
 
 
-def get_smooth_loss(disp, img):
-    """Computes the smoothness loss for a disparity image
+def get_smooth_loss(disp: Tensor, img: Tensor) -> Tensor:
+    """
+    Computes the smoothness loss for a disparity image
     The color image is used for edge-aware smoothness
     """
     grad_disp_x = torch.abs(disp[:, :, :, :-1] - disp[:, :, :, 1:])
@@ -212,10 +214,9 @@ def get_smooth_loss(disp, img):
 
 
 class SSIM(nn.Module):
-    """Layer to compute the SSIM loss between a pair of images
-    """
+    """Layer to compute the SSIM loss between a pair of images"""
     def __init__(self):
-        super(SSIM, self).__init__()
+        super().__init__()
         self.mu_x_pool = nn.AvgPool2d(3, 1)
         self.mu_y_pool = nn.AvgPool2d(3, 1)
         self.sig_x_pool = nn.AvgPool2d(3, 1)
