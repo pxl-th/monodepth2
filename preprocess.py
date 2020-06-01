@@ -29,20 +29,6 @@ def get_paths(base_dir: str, exist_tag: str = None) -> List[str]:
     return paths
 
 
-def preprocess(
-    input_template: str, output_template: str, length: int,
-    size: Tuple[int, int],
-) -> None:
-    for i in tqdm(range(length)):
-        image: ndarray = imread(input_template.format(i))
-        image = image[158:350]
-        if size is not None:
-            image = resize(image, size)
-            image *= 255
-            image = image.round().astype("uint8")
-        imsave(output_template.format(i), image, check_contrast=False)
-
-
 def comma():
     base_path = r"C:\Users\tonys\projects\python\comma\2k19"
     speed_path = r"processed_log\CAN\speed"
