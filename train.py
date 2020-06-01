@@ -420,6 +420,9 @@ class EffDepthTraining(LightningModule):
 
 
 def main():
+    # TODO add requiremetns
+    # TODO try adding vellocity loss
+    # TODO add eval for poses -> velocity
     hparams = Namespace(
         pretrained=True,
         encoder_layers=18,
@@ -427,10 +430,10 @@ def main():
         input_images=1,  # how many images in channel dim to feed to encoder
         pose_sequence_length=2,  # how many frames to feed to pose NN at once
         disparity_smoothness=1e-3,  # control sharpness of disparity
-        lr=1e-4, step_size=10, batch_size=4,
+        lr=3e-4, step_size=10, batch_size=4,
         height=160, width=320,  # have to be divisible by 2**5
         min_depth=0.1, max_depth=100.0,
-        target_id=4, sources_ids=[0, 8], sequence_length=9,
+        target_id=7, sources_ids=[0, 14], sequence_length=15,
         # kitti at 10 hz, maybe increase length
         device="cuda", dt=1 / 20,
     )

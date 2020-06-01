@@ -79,7 +79,7 @@ class SequenceData(Dataset):
         ids = self.ids + start
         return self.load_images(ids), self.targets[ids]
 
-    def load_images(self, ids: ndarray) -> Tensor:
+    def load_images(self, ids: List[int]) -> Tensor:
         """
         Returns:
             (l, c, w, h) Tensor:
