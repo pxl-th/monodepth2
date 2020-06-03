@@ -2,12 +2,12 @@ from argparse import Namespace
 from typing import Tuple, List
 from os.path import join
 
-from numpy import ndarray, array
+from numpy import array
 from skimage.io import imread
 from torch import Tensor, tensor, cat, float32, pinverse, full
 from torch.utils.data import Dataset
 
-from preprocess import get_paths
+from effdepth.preprocess import get_paths
 
 
 def compute_intrinsics(height: int, width: int) -> Tuple[Tensor, Tensor]:
