@@ -274,6 +274,10 @@ class DepthTraining(LightningModule):
     def _velocity_loss(
         self, estimated_velocities: Dict[int, Tensor], velocities: Tensor,
     ) -> Tensor:
+        # target_velocities = velocities[:, [self.batch_target_id, self.batch_sources_id[1]]]
+        # estimated_velocities = cat([
+        #     estimated_velocities[bsid] for bsid in self.batch_sources_id
+        # ], dim=1)
         target_velocities = cat([
             velocities[:, [self.batch_target_id]],
             velocities[:, [self.batch_sources_id[1]]],
@@ -307,6 +311,7 @@ class DepthTraining(LightningModule):
             list(self.encoder.parameters())
             + list(self.depth_decoder.parameters())
             + list(self.pose_decoder.parameters())
+            + list(self.velocity_decoder.parameters())
         )
         optimizer = Adam(train_parameters, self.hparams.lr)
         scheduler = lr_scheduler.StepLR(optimizer, self.hparams.step_size, 0.1)
@@ -337,20 +342,20 @@ class DepthTraining(LightningModule):
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx: int):
         inputs, target_velocities = batch
         disparities, poses, estimated_velocities = self.forward(inputs)
-        loss = self._compute_photometric_losses(inputs, disparities, poses)
-
+        loss: Tensor = 0
+        loss += self._compute_photometric_losses(inputs, disparities, poses)
         log = {"loss": loss}
-        # valid_velocities = (target_velocities != -1).all()
-        # if valid_velocities:
-        #     velocity_loss = self._velocity_loss(
-        #         estimated_velocities, target_velocities,
-        #     )
-        #     loss += velocity_loss
-        #     log["velocity_loss"] = velocity_loss
-        # if valid_velocities:
-        #     pose_constraint = self._pose_constraint_z(poses, target_velocities)
-        #     loss += pose_constraint
-        #     log["pose_constraint"] = pose_constraint
+
+        if (target_velocities != -1).all():
+            velocity_loss = self._velocity_loss(
+                estimated_velocities, target_velocities,
+            )
+            loss += velocity_loss
+            log["velocity_loss"] = velocity_loss
+
+            # pose_constraint = self._pose_constraint_z(poses, target_velocities)
+            # loss += pose_constraint
+            # log["pose_constraint"] = pose_constraint
 
         if batch_idx % 100 == 0:
             base = r"C:\Users\tonys\projects\python\comma\effdepth-models\disp"
@@ -375,8 +380,8 @@ class DepthTraining(LightningModule):
                 warp_path = join(base, f"warp-{self.global_step}-{bsid}.jpg")
                 imsave(warp_path, warped_image, check_contrast=False)
 
-            print("R", rotation.detach().cpu().numpy()[0, 0])
-            print("t", translation.detach().cpu().numpy()[0, 0])
+            # print("R", rotation.detach().cpu().numpy()[0, 0])
+            # print("t", translation.detach().cpu().numpy()[0, 0])
             # print(
             #     "Target velocity",
             #     target_velocities[0, 0].detach().cpu().numpy(),
@@ -413,7 +418,8 @@ def main():
     trainer = Trainer(
         logger=TensorBoardLogger(loggin_dir),
         checkpoint_callback=checkpoint_callback, early_stop_callback=False,
-        max_epochs=20, accumulate_grad_batches=3,
+        max_epochs=20,
+        accumulate_grad_batches=3,
         gpus=1 if hparams.device == "cuda" else 0,
         benchmark=True,
     )

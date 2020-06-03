@@ -95,14 +95,14 @@ class SequenceData(Dataset):
 
 def datasets_config(hparams: Namespace):
     datasets = [
-        # {  # speedchallenge train data
-        #     "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\frames-192x640\frame-{:05}.jpg",
-        #     "targets": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\train.txt",
-        # },
-        # {  # speedchallenge test data
-        #     "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\test\frames-192x640\frame-{:05}.jpg",
-        #     "length": 10798,
-        # },
+        {  # speedchallenge train data
+            "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\frames-160x320\frame-{}.jpg",
+            "targets": r"C:\Users\tonys\projects\python\comma\speedchallenge\train\train.txt",
+        },
+        {  # speedchallenge test data
+            "frame_template": r"C:\Users\tonys\projects\python\comma\speedchallenge\test\frames-160x320\frame-{}.jpg",
+            "length": 10798,
+        },
     ]
     comma_2k19_base = r"C:\Users\tonys\projects\python\comma\2k19"
     frames_sub = "frames-160x320"

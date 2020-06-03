@@ -310,6 +310,7 @@ class EfficientTraining(LightningModule):
             list(self.encoder.parameters())
             + list(self.depth_decoder.parameters())
             + list(self.pose_decoder.parameters())
+            # TODO do not forget to add new modules
         )
         optimizer = Adam(train_parameters, self.hparams.lr)
         scheduler = lr_scheduler.StepLR(optimizer, self.hparams.step_size, 0.1)
