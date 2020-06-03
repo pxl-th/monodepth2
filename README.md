@@ -6,9 +6,6 @@ On images with `160x360` resolution and batch size `4` it requires only `2Gb` of
 # Examples
 After 15 epochs of training on Chunk1 of [comma2k19](https://github.com/commaai/comma2k19) dataset.
 
-[Video demonstration](https://youtu.be/r-pw3RmKKnM)
+<p align="center"><img src="res/example-2.gif"/></p>
 
-![](res/disp-1.jpg?raw=true)
-![](res/disp-2.jpg?raw=true)
-![](res/disp-3.jpg?raw=true)
-![](res/disp-4.jpg?raw=true)
+[Video demonstration](https://youtu.be/r-pw3RmKKnM)
