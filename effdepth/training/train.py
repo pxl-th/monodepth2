@@ -7,11 +7,11 @@ from numpy import fromfile, transpose, round_, sort, argwhere, array
 from numpy.random import seed
 from torch import (
     Tensor, abs as tabs, cat, randn, min as tmin, from_numpy, manual_seed,
-    norm, float32, tensor,
+    norm, float32, tensor, stack,
 )
 from torch.nn.functional import interpolate, grid_sample, mse_loss
 from torch.utils.data import DataLoader, ConcatDataset
-from torch.optim import Adam, lr_scheduler
+from torch.optim import Adam, lr_scheduler, SGD
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.logging import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -22,7 +22,10 @@ from effdepth.models.layers import (
     SSIM, BackprojectDepth, Project3D, disp_to_depth,
     transformation_from_parameters, get_smooth_loss,
 )
-from effdepth.dataset import SequenceData, compute_intrinsics, datasets_config
+from effdepth.dataset import (
+    SequenceData, compute_intrinsics,
+    datasets_config, validation_dataset_config, add_dataset,
+)
 
 
 seed(0)
@@ -318,25 +321,23 @@ class DepthTraining(LightningModule):
         return [optimizer], [scheduler]
 
     def prepare_data(self):
-        datasets = []
-        for config in datasets_config(self.hparams):
-            if "targets" in config:
-                targets = from_numpy(fromfile(
-                    config["targets"], dtype="float32", sep="\n",
-                ))
-                datasets.append(SequenceData.target_dataset(
-                    config["frame_template"], targets, self.hparams,
-                ))
-            else:
-                datasets.append(SequenceData.no_target_dataset(
-                    config["frame_template"], config["length"], self.hparams,
-                ))
-        self.train_dataset = ConcatDataset(datasets)
+        train_datasets, validation_datasets = [], []
+        for config in datasets_config():
+            add_dataset(train_datasets, config, self.hparams)
+        for validation_config in validation_dataset_config():
+            add_dataset(validation_datasets, validation_config, self.hparams)
+        self.train_dataset = ConcatDataset(train_datasets)
+        self.validation_dataset = ConcatDataset(validation_datasets)
 
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset, self.hparams.batch_size,
             shuffle=True, drop_last=True,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.validation_dataset, self.hparams.batch_size, drop_last=True,
         )
 
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx: int):
@@ -349,7 +350,7 @@ class DepthTraining(LightningModule):
         if (target_velocities != -1).all():
             velocity_loss = self._velocity_loss(
                 estimated_velocities, target_velocities,
-            )
+            ) * 1e-4
             loss += velocity_loss
             log["velocity_loss"] = velocity_loss
 
@@ -393,6 +394,20 @@ class DepthTraining(LightningModule):
 
         return {"loss": loss, "log": log}
 
+    def validation_step(self, batch, batch_idx):
+        inputs, target_velocities = batch
+        estimated_velocities: Dict[int, Tensor] = self.estimate_velocities(
+            self.extract_features(inputs)[-1],
+        )
+        velocity_loss = self._velocity_loss(
+            estimated_velocities, target_velocities,
+        )
+        return {"val_loss": velocity_loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = stack([o["val_loss"] for o in outputs]).mean()
+        return {"val_loss": avg_loss, "log": {"val_loss": avg_loss}}
+
 
 def main():
     hparams = Namespace(
@@ -407,7 +422,7 @@ def main():
     )
     loggin_dir = r"C:\Users\tonys\projects\python\comma\effdepth-models"
     checkpoint_path = join(
-        loggin_dir, r"velo-160x320\depth-{epoch:02d}",
+        loggin_dir, r"velo-chunk-12-160x320\depth-{epoch:02d}",
     )
     # load_checkpoint_path = join(
     #     loggin_dir, r"manual-velocity-better\depth-epoch=01.ckpt",

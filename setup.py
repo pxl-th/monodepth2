@@ -18,6 +18,8 @@ setup(
     install_requires=[
         "torch>=1.5",
         "pytorch_lightning>=0.7",
+        "scikit-image>=0.17",
+        "scikit-video>=1.1",
     ],
     extras_require={},
     tests_require=[],

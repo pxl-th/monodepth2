@@ -1,5 +1,6 @@
 from os import makedirs, listdir
 from os.path import join, exists
+from subprocess import run
 from typing import List, Tuple
 from tqdm import tqdm
 
@@ -29,14 +30,27 @@ def get_paths(base_dir: str, exist_tag: str = None) -> List[str]:
     return paths
 
 
-def comma():
-    base_path = r"C:\Users\tonys\projects\python\comma\2k19"
+def hevc_to_mpeg(base_dir: str):
+    input_file = "video.hevc"
+    output_file = "video.mp4"
+    command = "ffmpeg -i {} -q:v 0 -filter:v fps=fps=20 {}"
+    for rec_dir in tqdm(listdir(base_dir)):
+        for part_dir in tqdm(listdir(join(base_dir, rec_dir))):
+            input_path = join(base_dir, rec_dir, part_dir, input_file)
+            output_path = join(base_dir, rec_dir, part_dir, output_file)
+            conversion_command = (
+                command.format(input_path, output_path).split(" ")
+            )
+            run(conversion_command)
+
+
+def comma(base_dir):
     speed_path = r"processed_log\CAN\speed"
     video_file = r"video.mp4"
     speeds_file = "value"
     output_speed_file = "speed.txt"
 
-    folders_paths = get_paths(base_path, output_speed_file)
+    folders_paths = get_paths(base_dir, output_speed_file)
     print(f"Total folders to process {len(folders_paths)}")
 
     bar = tqdm(folders_paths)
@@ -61,4 +75,7 @@ def comma():
 
 
 if __name__ == "__main__":
-    comma()
+    # base_dir = r"C:\Users\tonys\projects\python\comma\2k19"
+    base_dir = r"C:\Users\tonys\Downloads\comma2k19\Chunk_2"
+    # hevc_to_mpeg(base_dir)
+    comma(base_dir)
