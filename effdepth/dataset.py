@@ -4,17 +4,16 @@ from os.path import join
 
 from numpy import (
     array, fromfile, ndarray, hstack, linspace, ceil, logical_and, zeros,
+    repeat, arange, argwhere,
 )
 from skimage.io import imread
 from torch import Tensor, tensor, cat, float32, pinverse, full, from_numpy
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset, ConcatDataset
 
 from imgaug.augmenters import (
     Sequential, Sometimes, GaussianBlur, LinearContrast, Multiply,
 )
 from imgaug.parameters import Uniform, Deterministic, DiscreteUniform
-
-from matplotlib import pyplot
 
 from effdepth.preprocess import get_paths
 
@@ -114,6 +113,27 @@ class SequenceData(Dataset):
             images[i] = tensor(image).permute(2, 0, 1).unsqueeze_(0)
         return cat(images, dim=0)
 
+    def valid_ids(self) -> Tensor:
+        """
+        Valid ids are those that have no `-1`s in targets.
+        """
+        ids_shifts = repeat(arange(self.length, dtype="int64"), 3)
+        ids_shifts *= self.sequence_length
+
+        ids_span = hstack([self.ids] * self.length)
+        ids_span += ids_shifts
+
+        valid_mask = self.targets[ids_span] != -1
+        valid_mask = valid_mask.reshape(-1, 3)
+        valid_mask = logical_and(
+            logical_and(valid_mask[:, 0], valid_mask[:, 1]),
+            valid_mask[:, 2],
+        ).bool()
+        valid_ids = argwhere(valid_mask)[0]
+        if isinstance(valid_ids, Tensor):
+            valid_ids = valid_ids.numpy()
+        return valid_ids
+
 
 def datasets_config():
     datasets = [
@@ -161,22 +181,6 @@ def load_targets(path: str, numpy: bool = False) -> Union[ndarray, Tensor]:
     if numpy:
         return fromfile(path, dtype="float32", sep="\n")
     return from_numpy(fromfile(path, dtype="float32", sep="\n"))
-
-
-def add_dataset(
-    datasets: List[SequenceData], config, hparams: Namespace,
-) -> None:
-    augment = "augment" in config and config["augment"]
-    if "targets" in config:
-        datasets.append(SequenceData.target_dataset(
-            config["frame_template"], load_targets(config["targets"]),
-            hparams, augment=augment,
-        ))
-    else:
-        datasets.append(SequenceData.no_target_dataset(
-            config["frame_template"], config["length"], hparams,
-            augment=augment,
-        ))
 
 
 def create_dataset(config, hparams: Namespace) -> SequenceData:
@@ -233,23 +237,41 @@ def filter_out_splits(
         targets[split_masks[i]] = -1
 
 
-def even_targets(hparams: Namespace, parts: int = 9):
+def even_training_targets(
+    hparams: Namespace, parts: int = 9,
+) -> List[SequenceData]:
     splits, split_sizes = create_splits(datasets_config(), parts)
     target_split_size = min(split_sizes)
+    print(f"Target splits: {splits}")
+    print(f"Current datasets splits: {split_sizes}")
+    print(f"Minimum split size: {target_split_size}")
 
     loaded_split_sizes = zeros(len(split_sizes), dtype="int64")
     train_datasets = []
     for config in datasets_config():
         dataset = create_dataset(config, hparams)
-        train_datasets.append(dataset)
         if "length" in config:
+            train_datasets.append(dataset)
             continue
         filter_out_splits(
             dataset.targets, loaded_split_sizes, splits, target_split_size,
         )
+        train_datasets.append(Subset(dataset, dataset.valid_ids()))
 
-    filtered_targets = hstack([td.targets[td.targets != -1] for td in train_datasets])
-    split_sizes, _ = calculate_splits(filtered_targets, splits)
+    evened_targets = hstack([d.dataset.targets for d in train_datasets])
+    evened_split_sizes, _ = calculate_splits(evened_targets, splits)
+    print(f"Evened datasets splits: {evened_split_sizes}")
+    return train_datasets
+
+
+def get_training_dataset(hparams: Namespace) -> Dataset:
+    if "even_parts" in hparams:
+        datasets = even_training_targets(hparams, hparams.even_parts)
+    else:
+        datasets = [
+            create_dataset(config, hparams) for config in datasets_config()
+        ]
+    return ConcatDataset(datasets)
 
 
 def main():
@@ -262,8 +284,9 @@ def main():
         min_depth=0.1, max_depth=100.0,
         target_id=7, sources_ids=[0, 14], sequence_length=15,
         device="cuda", dt=1 / 20,
+        even_parts=9,
     )
-    even_targets(hparams)
+    get_training_dataset(hparams)
 
 
 if __name__ == "__main__":

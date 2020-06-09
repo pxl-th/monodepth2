@@ -24,7 +24,8 @@ from effdepth.models.layers import (
 )
 from effdepth.dataset import (
     SequenceData, compute_intrinsics,
-    datasets_config, validation_dataset_config, add_dataset,
+    datasets_config, validation_dataset_config, create_dataset,
+    get_training_dataset,
 )
 
 
@@ -321,13 +322,11 @@ class DepthTraining(LightningModule):
         return [optimizer], [scheduler]
 
     def prepare_data(self):
-        train_datasets, validation_datasets = [], []
-        for config in datasets_config():
-            add_dataset(train_datasets, config, self.hparams)
-        for validation_config in validation_dataset_config():
-            add_dataset(validation_datasets, validation_config, self.hparams)
-        self.train_dataset = ConcatDataset(train_datasets)
-        self.validation_dataset = ConcatDataset(validation_datasets)
+        self.train_dataset = get_training_dataset(self.hparams)
+        self.validation_dataset = ConcatDataset([
+            create_dataset(config, self.hparams)
+            for config in validation_dataset_config()
+        ])
 
     def train_dataloader(self):
         return DataLoader(
@@ -350,8 +349,8 @@ class DepthTraining(LightningModule):
         if (target_velocities != -1).all():
             velocity_loss = self._velocity_loss(
                 estimated_velocities, target_velocities,
-            ) * 1e-4
-            loss += velocity_loss
+            )
+            loss += velocity_loss * 1e-4
             log["velocity_loss"] = velocity_loss
 
             # pose_constraint = self._pose_constraint_z(poses, target_velocities)
@@ -419,10 +418,11 @@ def main():
         min_depth=0.1, max_depth=100.0,
         target_id=7, sources_ids=[0, 14], sequence_length=15,
         device="cuda", dt=1 / 20,
+        even_parts=9,
     )
     loggin_dir = r"C:\Users\tonys\projects\python\comma\effdepth-models"
     checkpoint_path = join(
-        loggin_dir, r"velo-chunk-12-160x320\depth-{epoch:02d}",
+        loggin_dir, r"velo-even-160x320\depth-{epoch:02d}",
     )
     # load_checkpoint_path = join(
     #     loggin_dir, r"manual-velocity-better\depth-epoch=01.ckpt",
